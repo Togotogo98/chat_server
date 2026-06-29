@@ -1,0 +1,19 @@
+# Executables
+server
+client
+
+# Object files
+*.o
+
+# Libraries
+*.a
+*.so
+
+# Build directories
+build/
+
+# VS Code
+.vscode/
+
+# Temporary files
+*~
