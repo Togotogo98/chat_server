@@ -24,21 +24,85 @@ using namespace std;
 
 /*for creating threads*/
 #include <thread>
+#include <vector>
+#include <mutex>
+#include <algorithm>
+
+
 
 #define SUCCESS   0
 #define FAILURE   1
 
+/* vector is a dynamic array. It resizes itself when 
+ * new clients join. Here, connected_clients are array
+ * of client socket file descriptors.
+ * */
+std::vector<int> connected_clients;
+std::mutex clients_mutex;
+
+void DisconnectClient( int client_socket )
+{
+   /* Remove client from the connected client list by using find().
+    * It returns an iterator that points to the position of where
+    * the element is in the vector.
+    * erase() removes that value from that position from vector.
+    * */
+   {
+      std::lock_guard<std::mutex> lock(clients_mutex);
+      auto iterator = std::find(connected_clients.begin(),
+	                        connected_clients.end(),
+		                client_socket);
+      /* if the element is not found, find() returns the position
+       * of one after the last element.
+       * */
+      if( iterator != connected_clients.end() )
+      {
+         connected_clients.erase(iterator);
+      }
+      cout << "Client Disconnected..." << endl;
+      cout << "Connected clients: "
+              << connected_clients.size()
+              << endl;
+   }
+
+   /* closing socket */
+   close(client_socket);
+   cout << "Client Disconnected..." << endl;
+   return;   
+}
+
+void BroadcastMessage(int sender_socket,
+                      const char *msg,
+                      size_t msg_len)
+{
+   ssize_t bytes_sent   = 0;
+   
+   std::lock_guard<std::mutex> lock(clients_mutex);
+
+   for ( const auto& rcvr_client : connected_clients )
+   {
+      if ( rcvr_client != sender_socket )
+      {
+         bytes_sent = send( rcvr_client,
+                            msg,
+                            msg_len,
+                            0 );
+         if (bytes_sent < 0)
+         {
+            cout << "ERR : Failed to send message." << endl;
+            return;
+         }
+      }
+   }
+   return;
+}
+
 void HandleClient( int ClientSocket )
 {
    ssize_t bytes_recvd  = 0;
-   ssize_t bytes_sent   = 0;
    
    /* Buffer is created to store the message from client */
    char buffer[1024];
-   /* Reply message for acknowledment */
-   const char *pReply = "Message received.";
-   
-   memset(buffer, 0, sizeof(buffer));
    
    /* recv() receives data from the client socket into buffer.
     * 
@@ -47,45 +111,37 @@ void HandleClient( int ClientSocket )
     *        error. POSIX uses the signed size type or
     *        ssize_t to represent the negative values.
     * */
+   while (true)
+   {
+      memset(buffer, 0, sizeof(buffer));
 
-   bytes_recvd = recv( ClientSocket,
+      bytes_recvd = recv( ClientSocket,
+                          buffer,
+                          sizeof(buffer) - 1,
+                          0 );
+
+      if ( bytes_recvd < 0 )
+      {
+         cout << "ERR : Failed to receive message." << endl;
+         break;
+      }
+
+      if ( bytes_recvd == 0 )
+      {
+         break;
+      }
+   
+      buffer[bytes_recvd] = '\0';
+
+      cout << "Client : " << buffer << endl;
+
+      BroadcastMessage(ClientSocket,
                        buffer,
-                       sizeof(buffer) - 1,
-                       0 );
+                       bytes_recvd);
 
-   if ( bytes_recvd < 0 )
-   {
-      cout << "ERR : Failed to receive message." << endl;
-      close(ClientSocket);
-      return;
-   }
-
-   if ( bytes_recvd == 0 )
-   {
-      cout << "--Client disconnected.--" << endl;
-      close(ClientSocket);
-      return;
-   }
-
-   buffer[bytes_recvd] = '\0';
-
-   cout << "Client : " << buffer << endl;
-   
-   /* send() is to send data to client */
-   bytes_sent = send( ClientSocket,
-                      pReply,
-                      strlen(pReply),
-                      0 );
-   if (bytes_sent < 0)
-   {
-      cout << "ERR : Failed to send message." << endl;
-      close(ClientSocket);
-      return;
    }
    
-   cout << "--Reply sent to client.--" << endl;
-   
-   close(ClientSocket);
+   DisconnectClient(ClientSocket);
    return;   
 }
 
@@ -144,7 +200,6 @@ int main ()
       close(server_fd);
       return FAILURE;
    }
-   cout << "--Socket Bound to Port 8080--" << endl;
 
    /* listen() puts the server socket into a passive waiting state and starts
     * maintaining a queue of incoming connection requests.
@@ -184,7 +239,17 @@ int main ()
          return FAILURE;
       }
 
-      cout << "--Client Connected--" << endl;
+      /* lock_guard locks clients_mutex and automatically unlocks it once the 
+       * block ends. push_back adds the new client to the vector clients' 
+       * list. */
+      {
+         std::lock_guard<std::mutex> lock(clients_mutex);
+	 connected_clients.push_back(client_fd);
+      
+         cout << "Connected clients: "
+              << connected_clients.size()
+              << endl;
+      }
 
       std::thread clientThread(HandleClient, client_fd);
       clientThread.detach();
