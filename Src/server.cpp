@@ -59,7 +59,6 @@ void DisconnectClient( int client_socket )
       {
          connected_clients.erase(iterator);
       }
-      cout << "Client Disconnected..." << endl;
       cout << "Connected clients: "
               << connected_clients.size()
               << endl;
@@ -133,7 +132,7 @@ void HandleClient( int ClientSocket )
    
       buffer[bytes_recvd] = '\0';
 
-      cout << "Client : " << buffer << endl;
+      cout << buffer << endl;
 
       BroadcastMessage(ClientSocket,
                        buffer,
