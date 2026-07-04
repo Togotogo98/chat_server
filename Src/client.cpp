@@ -1,13 +1,9 @@
 /******************************************************************************
- * Project : Multi-Client TCP Chat Server (Phase 1)
+ * Project : Multi-Client TCP Chat Server (TCP Chat Client)
  *
  * Description:
- *   Basic TCP client that:
- *     1. Creates a socket
- *     2. Connect to server
- *     3. Send data to server
- *     4. Receive a reply
- *     5. Close socket 
+ * This program connects to a TCP chat server, sends user messages, and
+ * receives messages from other connected clients.
  *
  ******************************************************************************/
 #include <iostream>

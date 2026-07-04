@@ -27,8 +27,8 @@ using namespace std;
 #include <vector>
 #include <mutex>
 #include <algorithm>
-
-
+#include <fcntl.h>
+#include <cerrno>
 
 #define SUCCESS   0
 #define FAILURE   1
@@ -121,8 +121,15 @@ void HandleClient( int ClientSocket )
 
       if ( bytes_recvd < 0 )
       {
-         cout << "ERR : Failed to receive message." << endl;
-         break;
+	 if ( errno == EAGAIN || errno == EWOULDBLOCK )
+         {
+            continue;
+         }
+	 else
+         {
+            cout << "ERR : Failed to receive message." << endl;
+            break;
+         }
       }
 
       if ( bytes_recvd == 0 )
@@ -150,6 +157,7 @@ int main ()
    int iRetVal          = 0;
    int server_fd        = 0;
    int client_fd        = 0;
+   int flags            = 0;
    socklen_t client_len = 0;
    
    /* sockaddr_in is a struct that contains fields for IP, port and address
@@ -237,6 +245,22 @@ int main ()
          close(server_fd);
          return FAILURE;
       }
+      
+      /* fcntl() returns the current file status flags of the socket.
+       * These flags represent the default settings Linux assigned when
+       * the socket was created. Copying/Storing them in 'flags' so the existing
+       * settings are preserved before adding O_NONBLOCK.
+       * F_GETFL: GET - read, FL - file status flags.
+       * */    
+      flags = fcntl(client_fd, F_GETFL, 0);
+
+      /* Keep all the existing socket settings, and enable non-blocking mode. */
+      flags |= O_NONBLOCK;
+
+      /* Apply the updated flags to the socket.
+       * F_SETFL: SET - set/apply updated flags.
+       * */
+      fcntl(client_fd, F_SETFL, flags);
 
       /* lock_guard locks clients_mutex and automatically unlocks it once the 
        * block ends. push_back adds the new client to the vector clients' 
