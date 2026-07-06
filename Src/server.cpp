@@ -32,6 +32,7 @@ using namespace std;
 #include <fcntl.h>
 #include <cerrno>
 
+#include "Socket.h"
 /* ================================================================================
  *     MACROS & GLOBAL VARIABLES
  * ================================================================================
@@ -151,13 +152,12 @@ void BroadcastMessage(int sender_socket,
 
 int main ()
 {
-   int iRetVal          = 0;
-   int server_fd        = 0;
+   int ret_val          = 0;
    int client_fd        = 0;
    char buffer[BUFFER_SIZE];
    socklen_t client_len = 0;
    ssize_t bytes_recvd  = 0;
-
+   Socket server_socket;
    /* epoll file descriptor represents an epoll object inside the Linux kernel. */
    int epoll_fd         = 0;
    int ready_sock_nmbr  = 0;
@@ -186,8 +186,8 @@ int main ()
     * SOCK_STREAM : Communicate by TCP
     * 0 : Informs Linux to use the default TCP protocol
     * */
-   server_fd = socket(AF_INET, SOCK_STREAM, 0);
-   if (server_fd < 0)
+   server_socket.SetFD( socket(AF_INET, SOCK_STREAM, 0) );
+   if ( !server_socket.IsValid() )
    {
       cout << "ERR : Socket creation failed." << endl;
       return FAILURE;
@@ -212,11 +212,12 @@ int main ()
    server_addr.sin_addr.s_addr   = INADDR_ANY;
 
    /* Bind the socket */
-   iRetVal = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
-   if ( iRetVal < 0 )
+   ret_val = bind( server_socket.GetFD(),
+		   (struct sockaddr *)&server_addr,
+		   sizeof(server_addr));
+   if ( ret_val < 0 )
    {
       cout << "ERR : Bind failed." << endl;
-      close(server_fd);
       return FAILURE;
    }
 
@@ -226,22 +227,21 @@ int main ()
     * Note : listen does not block the program execution, it only queues the
     *        incoming requests.
     * */
-   iRetVal = listen(server_fd, 5);
-   if ( iRetVal < 0 )
+   ret_val = listen( server_socket.GetFD(), 5 );
+   if ( ret_val < 0 )
    {
       cout << "ERR : Listen failed." << endl;
-      close(server_fd);
       return FAILURE;
    }
 
-   SetNonBlocking(server_fd);
+   SetNonBlocking(server_socket.GetFD());
 
    /* EPOLLIN - event to indicate an fd is ready to read */
    event.events = EPOLLIN;
-   event.data.fd = server_fd;
+   event.data.fd = server_socket.GetFD();
    /* Register the Server Socket to watch for incoming connection readiness
     * using EPOLL_CTL_ADD */
-   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) < 0)
+   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket.GetFD(), &event) < 0)
    {
       cout << "ERR : Failed to add server socket to epoll." << endl;
       return FAILURE;
@@ -270,7 +270,7 @@ int main ()
          current_sock_fd = ready_events[nmbr].data.fd;
 
 	 /*Server Socket will handle connection requests*/
-	 if ( current_sock_fd == server_fd )
+	 if ( current_sock_fd == server_socket.GetFD() )
          {
             while (true)
             {
@@ -282,7 +282,7 @@ int main ()
                * Note : accept pauses the server, waits for a client
                *        to connect before continuing execution.
                * */
-               client_fd = accept(server_fd,
+               client_fd = accept(server_socket.GetFD(),
                                   (struct sockaddr *)&client_addr,
                                   &client_len);
 
@@ -354,7 +354,6 @@ int main ()
       }
    } 
    /* Cleanup before exiting program */
-   close(server_fd);
    close(epoll_fd);
    return SUCCESS;
 }
