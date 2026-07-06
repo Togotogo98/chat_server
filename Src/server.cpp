@@ -1,4 +1,4 @@
-/******************************************************************************
+/*********************************************************************************
  * Project : Multi-Client TCP Chat Server
  *
  * Description:
@@ -6,11 +6,14 @@
  *   processes client requests, and facilitates communication between multiple
  *   clients.
  *
- ******************************************************************************/
+ *********************************************************************************/
+
+/* ================================================================================
+ *     HEADERS
+ * ================================================================================
+ */
 #include <iostream>
 using namespace std;
-
-/*C style string handling*/
 #include <cstring>
 
 /*provides linux system calls*/
@@ -22,51 +25,96 @@ using namespace std;
 /*core socket api*/
 #include <sys/socket.h>
 
-/*for creating threads*/
-#include <thread>
+#include <sys/epoll.h>
+
 #include <vector>
-#include <mutex>
 #include <algorithm>
 #include <fcntl.h>
 #include <cerrno>
 
-#define SUCCESS   0
-#define FAILURE   1
+/* ================================================================================
+ *     MACROS & GLOBAL VARIABLES
+ * ================================================================================
+ */
+
+#define SUCCESS     0
+#define FAILURE     1
+#define PORT        8080
+#define MAX_EVENTS  64
+#define BUFFER_SIZE 1024
 
 /* vector is a dynamic array. It resizes itself when 
  * new clients join. Here, connected_clients are array
  * of client socket file descriptors.
  * */
 std::vector<int> connected_clients;
-std::mutex clients_mutex;
 
-void DisconnectClient( int client_socket )
+/* ================================================================================
+ *     FUNCTION DEFINATIONS
+ * ================================================================================
+ */
+
+void SetNonBlocking(int socket_fd)
 {
+   int flags = 0;
+
+   /* fcntl() returns the current file status flags of the socket.
+    * These flags represent the default settings Linux assigned when
+    * the socket was created. Copying/Storing them in 'flags' so the existing
+    * settings are preserved before adding O_NONBLOCK.
+    * F_GETFL: GET - read, FL - file status flags.
+    * */
+   flags = fcntl(socket_fd, F_GETFL, 0);
+   if (flags < 0)
+   {
+      cout << "ERR : Failed to get socket flags." << endl;
+      return;
+   }
+
+   /* Keep all the existing socket settings, and enable non-blocking mode. */
+   flags |= O_NONBLOCK;
+
+   /* Apply the updated flags to the socket.
+    * F_SETFL: SET - set/apply updated flags.
+    * */   
+   if (fcntl(socket_fd, F_SETFL, flags) < 0)
+   {
+      cout << "ERR : Failed to set socket as non-blocking." << endl;
+   }
+}
+
+void DisconnectClient( int epoll_fd,
+                       int client_socket )
+{
+   /* Remove socket from epoll monitoring.*/
+   if ( epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, nullptr) < 0 )
+   {
+      cout << "ERR : Failed to remove socket from epoll." << endl;
+   }
+   
    /* Remove client from the connected client list by using find().
     * It returns an iterator that points to the position of where
     * the element is in the vector.
     * erase() removes that value from that position from vector.
     * */
+   auto iterator = std::find(connected_clients.begin(),
+                             connected_clients.end(),
+		             client_socket);
+   /* if the element is not found, find() returns the position
+    * of one after the last element.
+    * */
+   if( iterator != connected_clients.end() )
    {
-      std::lock_guard<std::mutex> lock(clients_mutex);
-      auto iterator = std::find(connected_clients.begin(),
-	                        connected_clients.end(),
-		                client_socket);
-      /* if the element is not found, find() returns the position
-       * of one after the last element.
-       * */
-      if( iterator != connected_clients.end() )
-      {
-         connected_clients.erase(iterator);
-      }
-      cout << "Connected clients: "
-              << connected_clients.size()
-              << endl;
+      connected_clients.erase(iterator);
    }
-
+   
    /* closing socket */
    close(client_socket);
-   cout << "Client Disconnected..." << endl;
+   cout << "Client [" << client_socket
+        << "] Disconnected." << endl;
+   cout << "Connected clients: "
+        << connected_clients.size()
+        << endl;
    return;   
 }
 
@@ -76,8 +124,6 @@ void BroadcastMessage(int sender_socket,
 {
    ssize_t bytes_sent   = 0;
    
-   std::lock_guard<std::mutex> lock(clients_mutex);
-
    for ( const auto& rcvr_client : connected_clients )
    {
       if ( rcvr_client != sender_socket )
@@ -88,78 +134,38 @@ void BroadcastMessage(int sender_socket,
                             0 );
          if (bytes_sent < 0)
          {
-            cout << "ERR : Failed to send message." << endl;
-            return;
+            cout << "ERR : Failed to send message" 
+                 << " to client [" << rcvr_client << "]."
+                 << endl;
+            continue;
          }
       }
    }
    return;
 }
 
-void HandleClient( int ClientSocket )
-{
-   ssize_t bytes_recvd  = 0;
-   
-   /* Buffer is created to store the message from client */
-   char buffer[1024];
-   
-   /* recv() receives data from the client socket into buffer.
-    * 
-    * Note : The return type of recv() is ssize_t because
-    *        it returns a size in number of bytes or -1 for
-    *        error. POSIX uses the signed size type or
-    *        ssize_t to represent the negative values.
-    * */
-   while (true)
-   {
-      memset(buffer, 0, sizeof(buffer));
-
-      bytes_recvd = recv( ClientSocket,
-                          buffer,
-                          sizeof(buffer) - 1,
-                          0 );
-
-      if ( bytes_recvd < 0 )
-      {
-	 if ( errno == EAGAIN || errno == EWOULDBLOCK )
-         {
-            continue;
-         }
-	 else
-         {
-            cout << "ERR : Failed to receive message." << endl;
-            break;
-         }
-      }
-
-      if ( bytes_recvd == 0 )
-      {
-         break;
-      }
-   
-      buffer[bytes_recvd] = '\0';
-
-      cout << buffer << endl;
-
-      BroadcastMessage(ClientSocket,
-                       buffer,
-                       bytes_recvd);
-
-   }
-   
-   DisconnectClient(ClientSocket);
-   return;   
-}
-
+/* ================================================================================
+ *                                M A I N
+ * ================================================================================
+ */
 
 int main ()
 {
    int iRetVal          = 0;
    int server_fd        = 0;
    int client_fd        = 0;
-   int flags            = 0;
+   char buffer[BUFFER_SIZE];
    socklen_t client_len = 0;
+   ssize_t bytes_recvd  = 0;
+
+   /* epoll file descriptor represents an epoll object inside the Linux kernel. */
+   int epoll_fd         = 0;
+   int ready_sock_nmbr  = 0;
+   int current_sock_fd  = 0;
+   struct epoll_event event;
+   struct epoll_event ready_events[MAX_EVENTS];
    
+
    /* sockaddr_in is a struct that contains fields for IP, port and address
     * family - all used to initialise the socket.
     *
@@ -187,17 +193,23 @@ int main ()
       return FAILURE;
    }
 
+   /* Create an epoll instance. */
+   epoll_fd = epoll_create1(0);
+
+   if (epoll_fd < 0)
+   {
+      cout << "ERR : Failed to create epoll instance." << endl;
+      return FAILURE;
+   }
+
    /* Populate the server_addr struct with socket IP and port details */
-   
    server_addr.sin_family        = AF_INET;
    
    /* htons() twiddles host's little-endian number to big-endian for network */
-   server_addr.sin_port          = htons(8080);
+   server_addr.sin_port          = htons(PORT);
    
    /* INADDR_ANY : Accept connections on any network interface.*/
    server_addr.sin_addr.s_addr   = INADDR_ANY;
-
-
 
    /* Bind the socket */
    iRetVal = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
@@ -221,64 +233,128 @@ int main ()
       close(server_fd);
       return FAILURE;
    }
-   cout << "--Listening on port 8080--" << endl;
+
+   SetNonBlocking(server_fd);
+
+   /* EPOLLIN - event to indicate an fd is ready to read */
+   event.events = EPOLLIN;
+   event.data.fd = server_fd;
+   /* Register the Server Socket to watch for incoming connection readiness
+    * using EPOLL_CTL_ADD */
+   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) < 0)
+   {
+      cout << "ERR : Failed to add server socket to epoll." << endl;
+      return FAILURE;
+   }
+
+   cout << "--Server Initialized--" << endl;
 
    
    /* Prepare to accept clients */
    while(true)
    {
-      client_len = sizeof(client_addr);
-
-      /* accept() takes one pending connection from the listen queue and creates
-       * a new socket dedicated to that client.
-       * client_addr struct : contains client's IP and port
-       * Note : accept pauses the server, waits for a client to connect before
-       *        continuing execution.
-       * */
-      client_fd = accept(server_fd,
-                        (struct sockaddr *)&client_addr,
-                        &client_len);
-
-      if (client_fd < 0)
+      /* Wait until there is ready events among sockets in epoll */
+      ready_sock_nmbr = epoll_wait(epoll_fd, 
+                                   ready_events, 
+				   MAX_EVENTS, 
+				   -1);
+      if ( ready_sock_nmbr < 0 )
       {
-         cout << "ERR : Accept failed." << endl;
-         close(server_fd);
-         return FAILURE;
-      }
-      
-      /* fcntl() returns the current file status flags of the socket.
-       * These flags represent the default settings Linux assigned when
-       * the socket was created. Copying/Storing them in 'flags' so the existing
-       * settings are preserved before adding O_NONBLOCK.
-       * F_GETFL: GET - read, FL - file status flags.
-       * */    
-      flags = fcntl(client_fd, F_GETFL, 0);
-
-      /* Keep all the existing socket settings, and enable non-blocking mode. */
-      flags |= O_NONBLOCK;
-
-      /* Apply the updated flags to the socket.
-       * F_SETFL: SET - set/apply updated flags.
-       * */
-      fcntl(client_fd, F_SETFL, flags);
-
-      /* lock_guard locks clients_mutex and automatically unlocks it once the 
-       * block ends. push_back adds the new client to the vector clients' 
-       * list. */
-      {
-         std::lock_guard<std::mutex> lock(clients_mutex);
-	 connected_clients.push_back(client_fd);
-      
-         cout << "Connected clients: "
-              << connected_clients.size()
-              << endl;
+         cout << "ERR : epoll_wait loop failure. " << endl;
+	 return FAILURE;
       }
 
-      std::thread clientThread(HandleClient, client_fd);
-      clientThread.detach();
-   }
-      
-   /* Closing sockets before exiting program */
+      /* Iterate through the array of ready sockets. */
+      for ( int nmbr = 0; nmbr < ready_sock_nmbr; ++nmbr )
+      {
+         current_sock_fd = ready_events[nmbr].data.fd;
+
+	 /*Server Socket will handle connection requests*/
+	 if ( current_sock_fd == server_fd )
+         {
+            while (true)
+            {
+               client_len = sizeof(client_addr);
+
+              /* accept() takes one pending connection from the listen queue 
+	       * and creates a new socket dedicated to that client.
+               * client_addr struct : contains client's IP and port
+               * Note : accept pauses the server, waits for a client
+               *        to connect before continuing execution.
+               * */
+               client_fd = accept(server_fd,
+                                  (struct sockaddr *)&client_addr,
+                                  &client_len);
+
+               if (client_fd < 0)
+               {
+                  if ( errno == EAGAIN || errno == EWOULDBLOCK )
+		  {   break; }
+
+                  cout << "ERR : Accept failed." << endl;
+                  break;
+               }
+
+              /* Set client socket as Non-Blocking. A Non-blocking socket returns
+               * immediatly if there is no data present (eg: Client doesn't type
+               * a message for a long time). A blocking socket keeps waiting. */
+               SetNonBlocking(client_fd);
+
+	       /* Register client to epoll. */
+	       event.events = EPOLLIN;
+               event.data.fd = client_fd;
+
+               if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0)
+               {
+                  cout << "ERR : Failed to add client socket to epoll." << endl;
+                  close(client_fd);
+		  continue;
+               }
+
+               connected_clients.push_back(client_fd);
+
+               cout << "Connected clients: "
+                    << connected_clients.size()
+                    << endl;
+            }//while end
+         }
+	 else
+         {
+            memset(buffer, 0, sizeof(buffer));
+
+            /* recv() receives data from the client socket into buffer.
+             *
+             * Note : The return type of recv() is ssize_t because
+             *        it returns a size in number of bytes or -1 for
+             *        error. POSIX uses the signed size type or
+             *        ssize_t to represent the negative values.
+             * */
+
+	    bytes_recvd = recv( current_sock_fd,
+                                buffer,
+                                sizeof(buffer) - 1,
+                                0 );
+
+            if ( bytes_recvd == 0 || 
+                 (bytes_recvd < 0 && errno != EAGAIN))
+            {
+	       DisconnectClient(epoll_fd, current_sock_fd);
+	       continue;
+            }
+
+            buffer[bytes_recvd] = '\0';
+            
+	    /* Print msg on server.*/
+	    cout << buffer << endl;
+
+            BroadcastMessage(current_sock_fd,
+                             buffer,
+                             bytes_recvd); 
+	 }
+      }
+   } 
+   /* Cleanup before exiting program */
    close(server_fd);
+   close(epoll_fd);
    return SUCCESS;
 }
