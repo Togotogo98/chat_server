@@ -33,6 +33,7 @@ using namespace std;
 #include <cerrno>
 
 #include "Socket.h"
+#include "Epoll.h"
 /* ================================================================================
  *     MACROS & GLOBAL VARIABLES
  * ================================================================================
@@ -54,41 +55,30 @@ std::vector<int> connected_clients;
  *     FUNCTION DEFINATIONS
  * ================================================================================
  */
-
 void SetNonBlocking(int socket_fd)
 {
    int flags = 0;
-
-   /* fcntl() returns the current file status flags of the socket.
-    * These flags represent the default settings Linux assigned when
-    * the socket was created. Copying/Storing them in 'flags' so the existing
-    * settings are preserved before adding O_NONBLOCK.
-    * F_GETFL: GET - read, FL - file status flags.
-    * */
+   
    flags = fcntl(socket_fd, F_GETFL, 0);
    if (flags < 0)
    {
       cout << "ERR : Failed to get socket flags." << endl;
       return;
    }
-
-   /* Keep all the existing socket settings, and enable non-blocking mode. */
+   
    flags |= O_NONBLOCK;
 
-   /* Apply the updated flags to the socket.
-    * F_SETFL: SET - set/apply updated flags.
-    * */   
    if (fcntl(socket_fd, F_SETFL, flags) < 0)
    {
       cout << "ERR : Failed to set socket as non-blocking." << endl;
    }
 }
 
-void DisconnectClient( int epoll_fd,
+void DisconnectClient( Epoll& epoll,
                        int client_socket )
 {
    /* Remove socket from epoll monitoring.*/
-   if ( epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_socket, nullptr) < 0 )
+   if ( !epoll.Remove(client_socket)  )
    {
       cout << "ERR : Failed to remove socket from epoll." << endl;
    }
@@ -152,14 +142,12 @@ void BroadcastMessage(int sender_socket,
 
 int main ()
 {
-   int ret_val          = 0;
    int client_fd        = 0;
    char buffer[BUFFER_SIZE];
    socklen_t client_len = 0;
    ssize_t bytes_recvd  = 0;
    Socket server_socket;
-   /* epoll file descriptor represents an epoll object inside the Linux kernel. */
-   int epoll_fd         = 0;
+   Epoll epoll;
    int ready_sock_nmbr  = 0;
    int current_sock_fd  = 0;
    struct epoll_event event;
@@ -173,75 +161,53 @@ int main ()
     * sockaddr_in6 : struct for IPv6
     * sockaddr     : generic struct - bind expects this
     * */
-   struct sockaddr_in server_addr;
-   struct sockaddr_in client_addr;
+   sockaddr_in server_addr{};
+   sockaddr_in client_addr{};
    
-   /* Initialise all bytes to zero */
-   memset(&server_addr, 0, sizeof(server_addr));
-   memset(&client_addr, 0, sizeof(client_addr));
-   
-   /* socket() creates a socket and returns a file descriptor - a number to
-    * identify the socket.
-    * AF_INET     : Address family IPv4 (INET6 is IPv6)
-    * SOCK_STREAM : Communicate by TCP
-    * 0 : Informs Linux to use the default TCP protocol
-    * */
-   server_socket.SetFD( socket(AF_INET, SOCK_STREAM, 0) );
-   if ( !server_socket.IsValid() )
+   /* Create a server socket. */
+   if ( !server_socket.Create() )
    {
       cout << "ERR : Socket creation failed." << endl;
       return FAILURE;
    }
 
    /* Create an epoll instance. */
-   epoll_fd = epoll_create1(0);
-
-   if (epoll_fd < 0)
+   if (!epoll.Create())
    {
       cout << "ERR : Failed to create epoll instance." << endl;
       return FAILURE;
    }
 
-   /* Populate the server_addr struct with socket IP and port details */
+   /* Populate the server_addr struct with socket IP and port details.
+    * htons() : It twiddles host's little-endian no. to big-endian for network.
+    * INADDR_ANY : Accept connections on any network interface.*/
    server_addr.sin_family        = AF_INET;
-   
-   /* htons() twiddles host's little-endian number to big-endian for network */
    server_addr.sin_port          = htons(PORT);
-   
-   /* INADDR_ANY : Accept connections on any network interface.*/
    server_addr.sin_addr.s_addr   = INADDR_ANY;
 
    /* Bind the socket */
-   ret_val = bind( server_socket.GetFD(),
-		   (struct sockaddr *)&server_addr,
-		   sizeof(server_addr));
-   if ( ret_val < 0 )
+   if ( !server_socket.Bind(server_addr) )
    {
       cout << "ERR : Bind failed." << endl;
       return FAILURE;
    }
 
-   /* listen() puts the server socket into a passive waiting state and starts
-    * maintaining a queue of incoming connection requests.
-    * backlog = 5 : Allows up to 5 clients waiting in queue then reject new ones.
-    * Note : listen does not block the program execution, it only queues the
-    *        incoming requests.
-    * */
-   ret_val = listen( server_socket.GetFD(), 5 );
-   if ( ret_val < 0 )
+   /* Listen to socket */
+   if ( !server_socket.Listen(5) )
    {
       cout << "ERR : Listen failed." << endl;
       return FAILURE;
    }
 
-   SetNonBlocking(server_socket.GetFD());
+   /* Set server to Non-Blocking */
+   server_socket.SetNonBlocking();
 
    /* EPOLLIN - event to indicate an fd is ready to read */
    event.events = EPOLLIN;
    event.data.fd = server_socket.GetFD();
-   /* Register the Server Socket to watch for incoming connection readiness
-    * using EPOLL_CTL_ADD */
-   if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket.GetFD(), &event) < 0)
+
+   /* Register the Server Socket */
+   if (!epoll.Add(server_socket.GetFD(), event))
    {
       cout << "ERR : Failed to add server socket to epoll." << endl;
       return FAILURE;
@@ -254,10 +220,9 @@ int main ()
    while(true)
    {
       /* Wait until there is ready events among sockets in epoll */
-      ready_sock_nmbr = epoll_wait(epoll_fd, 
-                                   ready_events, 
-				   MAX_EVENTS, 
-				   -1);
+      ready_sock_nmbr = epoll.Wait(ready_events,
+                                   MAX_EVENTS,
+                                   -1); 
       if ( ready_sock_nmbr < 0 )
       {
          cout << "ERR : epoll_wait loop failure. " << endl;
@@ -304,10 +269,10 @@ int main ()
 	       event.events = EPOLLIN;
                event.data.fd = client_fd;
 
-               if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) < 0)
+               if (!epoll.Add(client_fd, event))
                {
                   cout << "ERR : Failed to add client socket to epoll." << endl;
-                  close(client_fd);
+		  close(client_fd);
 		  continue;
                }
 
@@ -338,7 +303,7 @@ int main ()
             if ( bytes_recvd == 0 || 
                  (bytes_recvd < 0 && errno != EAGAIN))
             {
-	       DisconnectClient(epoll_fd, current_sock_fd);
+	       DisconnectClient(epoll, current_sock_fd);
 	       continue;
             }
 
@@ -353,7 +318,5 @@ int main ()
 	 }
       }
    } 
-   /* Cleanup before exiting program */
-   close(epoll_fd);
    return SUCCESS;
 }
