@@ -1,10 +1,14 @@
 /******************************************************************************
- * Project : Multi-Client TCP Chat Server
+ * Project : Multi-Client TCP Chat Server (Phase 1)
  *
  * Description:
- *   TCP-based client-server application that accepts client connections,
- *   processes client requests, and facilitates communication between multiple
- *   clients.
+ *   Basic TCP server that:
+ *     1. Creates a socket
+ *     2. Binds to port 8080
+ *     3. Listens for one client
+ *     4. Accepts a connection
+ *     5. Receives a message
+ *     6. Sends an acknowledgement
  *
  ******************************************************************************/
 #include <iostream>
@@ -22,72 +26,8 @@ using namespace std;
 /*core socket api*/
 #include <sys/socket.h>
 
-/*for creating threads*/
-#include <thread>
-
 #define SUCCESS   0
 #define FAILURE   1
-
-void HandleClient( int ClientSocket )
-{
-   ssize_t bytes_recvd  = 0;
-   ssize_t bytes_sent   = 0;
-   
-   /* Buffer is created to store the message from client */
-   char buffer[1024];
-   /* Reply message for acknowledment */
-   const char *pReply = "Message received.";
-   
-   memset(buffer, 0, sizeof(buffer));
-   
-   /* recv() receives data from the client socket into buffer.
-    * 
-    * Note : The return type of recv() is ssize_t because
-    *        it returns a size in number of bytes or -1 for
-    *        error. POSIX uses the signed size type or
-    *        ssize_t to represent the negative values.
-    * */
-
-   bytes_recvd = recv( ClientSocket,
-                       buffer,
-                       sizeof(buffer) - 1,
-                       0 );
-
-   if ( bytes_recvd < 0 )
-   {
-      cout << "ERR : Failed to receive message." << endl;
-      close(ClientSocket);
-      return;
-   }
-
-   if ( bytes_recvd == 0 )
-   {
-      cout << "--Client disconnected.--" << endl;
-      close(ClientSocket);
-      return;
-   }
-
-   buffer[bytes_recvd] = '\0';
-
-   cout << "Client : " << buffer << endl;
-   
-   /* send() is to send data to client */
-   bytes_sent = send( ClientSocket,
-                      pReply,
-                      strlen(pReply),
-                      0 );
-   if (bytes_sent < 0)
-   {
-      cout << "ERR : Failed to send message." << endl;
-      close(ClientSocket);
-      return;
-   }
-   
-   cout << "--Reply sent to client.--" << endl;
-   
-   close(ClientSocket);
-   return;   
-}
 
 
 int main ()
@@ -96,6 +36,13 @@ int main ()
    int server_fd        = 0;
    int client_fd        = 0;
    socklen_t client_len = 0;
+   ssize_t bytes_recvd  = 0;
+   ssize_t bytes_sent   = 0;
+   
+   /* Buffer is created to store the message from client */
+   char buffer[1024];
+   /* Reply message for acknowledment */
+   const char *pReply = "Message received.";
    
    /* sockaddr_in is a struct that contains fields for IP, port and address
     * family - all used to initialise the socket.
@@ -110,6 +57,9 @@ int main ()
    /* Initialise all bytes to zero */
    memset(&server_addr, 0, sizeof(server_addr));
    memset(&client_addr, 0, sizeof(client_addr));
+   memset(buffer, 0, sizeof(buffer));
+   
+   
    
    /* socket() creates a socket and returns a file descriptor - a number to
     * identify the socket.
@@ -163,34 +113,77 @@ int main ()
 
    
    /* Prepare to accept clients */
-   while(true)
+   client_len = sizeof(client_addr);
+
+   /* accept() takes one pending connection from the listen queue and creates
+    * a new socket dedicated to that client.
+    * client_addr struct : contains client's IP and port
+    * Note : accept pauses the server, waits for a client to connect before
+    *        continuing execution.
+    * */
+   client_fd = accept(server_fd,
+                     (struct sockaddr *)&client_addr,
+                     &client_len);
+
+   if (client_fd < 0)
    {
-      client_len = sizeof(client_addr);
-
-      /* accept() takes one pending connection from the listen queue and creates
-       * a new socket dedicated to that client.
-       * client_addr struct : contains client's IP and port
-       * Note : accept pauses the server, waits for a client to connect before
-       *        continuing execution.
-       * */
-      client_fd = accept(server_fd,
-                        (struct sockaddr *)&client_addr,
-                        &client_len);
-
-      if (client_fd < 0)
-      {
-         cout << "ERR : Accept failed." << endl;
-         close(server_fd);
-         return FAILURE;
-      }
-
-      cout << "--Client Connected--" << endl;
-
-      std::thread clientThread(HandleClient, client_fd);
-      clientThread.detach();
+      cout << "ERR : Accept failed." << endl;
+      close(server_fd);
+      return FAILURE;
    }
-      
+
+   cout << "--Client Connected--" << endl;
+
+   /* recv() receives data from the client socket into buffer.
+    * 
+    * Note : The return type of recv() is ssize_t because
+    *        it returns a size in number of bytes or -1 for
+    *        error. POSIX uses the signed size type or
+    *        ssize_t to represent the negative values.
+    * */
+
+   bytes_recvd = recv( client_fd,
+                       buffer,
+                       sizeof(buffer) - 1,
+                       0 );
+
+   if ( bytes_recvd < 0 )
+   {
+      cout << "ERR : Failed to receive message." << endl;
+      close(client_fd);
+      close(server_fd);
+      return FAILURE;
+   }
+
+   if ( bytes_recvd == 0 )
+   {
+      cout << "--Client disconnected.--" << endl;
+      close(client_fd);
+      close(server_fd);
+      return SUCCESS;
+   }
+
+   buffer[bytes_recvd] = '\0';
+
+   cout << "Client : " << buffer << endl;
+   
+   /* send() is to send data to client */
+   bytes_sent = send( client_fd,
+                      pReply,
+                      strlen(pReply),
+                      0 );
+   if (bytes_sent < 0)
+   {
+      cout << "ERR : Failed to send message." << endl;
+      close(client_fd);
+      close(server_fd);
+      return FAILURE;
+   }
+   
+   cout << "--Reply sent to client.--" << endl;
+   
    /* Closing sockets before exiting program */
+   close(client_fd);
    close(server_fd);
    return SUCCESS;
 }
