@@ -1,5 +1,5 @@
-/******************************************************************************
- * Project : Multi-Client TCP Chat Server (Phase 1)
+/*********************************************************************************
+ * Project : Multi-Client TCP Chat Server
  *
  * Description:
  *   Basic TCP server that:
@@ -10,11 +10,14 @@
  *     5. Receives a message
  *     6. Sends an acknowledgement
  *
- ******************************************************************************/
+ *********************************************************************************/
+
+/* ================================================================================
+ *     HEADERS
+ * ================================================================================
+ */
 #include <iostream>
 using namespace std;
-
-/*C style string handling*/
 #include <cstring>
 
 /*provides linux system calls*/
@@ -26,24 +29,135 @@ using namespace std;
 /*core socket api*/
 #include <sys/socket.h>
 
-#define SUCCESS   0
-#define FAILURE   1
+#include <sys/epoll.h>
 
+#include <vector>
+#include <algorithm>
+#include <fcntl.h>
+#include <cerrno>
+
+#include "Socket.h"
+#include "Epoll.h"
+/* ================================================================================
+ *     MACROS & GLOBAL VARIABLES
+ * ================================================================================
+ */
+
+#define SUCCESS     0
+#define FAILURE     1
+#define PORT        8080
+#define MAX_EVENTS  64
+#define BUFFER_SIZE 1024
+
+/* vector is a dynamic array. It resizes itself when 
+ * new clients join. Here, connected_clients are array
+ * of client socket file descriptors.
+ * */
+std::vector<int> connected_clients;
+
+/* ================================================================================
+ *     FUNCTION DEFINATIONS
+ * ================================================================================
+ */
+void SetNonBlocking(int socket_fd)
+{
+   int flags = 0;
+   
+   flags = fcntl(socket_fd, F_GETFL, 0);
+   if (flags < 0)
+   {
+      cout << "ERR : Failed to get socket flags." << endl;
+      return;
+   }
+   
+   flags |= O_NONBLOCK;
+
+   if (fcntl(socket_fd, F_SETFL, flags) < 0)
+   {
+      cout << "ERR : Failed to set socket as non-blocking." << endl;
+   }
+}
+
+void DisconnectClient( Epoll& epoll,
+                       int client_socket )
+{
+   /* Remove socket from epoll monitoring.*/
+   if ( !epoll.Remove(client_socket)  )
+   {
+      cout << "ERR : Failed to remove socket from epoll." << endl;
+   }
+   
+   /* Remove client from the connected client list by using find().
+    * It returns an iterator that points to the position of where
+    * the element is in the vector.
+    * erase() removes that value from that position from vector.
+    * */
+   auto iterator = std::find(connected_clients.begin(),
+                             connected_clients.end(),
+		             client_socket);
+   /* if the element is not found, find() returns the position
+    * of one after the last element.
+    * */
+   if( iterator != connected_clients.end() )
+   {
+      connected_clients.erase(iterator);
+   }
+   
+   /* closing socket */
+   close(client_socket);
+   cout << "Client [" << client_socket
+        << "] Disconnected." << endl;
+   cout << "Connected clients: "
+        << connected_clients.size()
+        << endl;
+   return;   
+}
+
+void BroadcastMessage(int sender_socket,
+                      const char *msg,
+                      size_t msg_len)
+{
+   ssize_t bytes_sent   = 0;
+   
+   for ( const auto& rcvr_client : connected_clients )
+   {
+      if ( rcvr_client != sender_socket )
+      {
+         bytes_sent = send( rcvr_client,
+                            msg,
+                            msg_len,
+                            0 );
+         if (bytes_sent < 0)
+         {
+            cout << "ERR : Failed to send message" 
+                 << " to client [" << rcvr_client << "]."
+                 << endl;
+            continue;
+         }
+      }
+   }
+   return;
+}
+
+/* ================================================================================
+ *                                M A I N
+ * ================================================================================
+ */
 
 int main ()
 {
-   int iRetVal          = 0;
-   int server_fd        = 0;
    int client_fd        = 0;
+   char buffer[BUFFER_SIZE];
    socklen_t client_len = 0;
    ssize_t bytes_recvd  = 0;
-   ssize_t bytes_sent   = 0;
+   Socket server_socket;
+   Epoll epoll;
+   int ready_sock_nmbr  = 0;
+   int current_sock_fd  = 0;
+   struct epoll_event event;
+   struct epoll_event ready_events[MAX_EVENTS];
    
-   /* Buffer is created to store the message from client */
-   char buffer[1024];
-   /* Reply message for acknowledment */
-   const char *pReply = "Message received.";
-   
+
    /* sockaddr_in is a struct that contains fields for IP, port and address
     * family - all used to initialise the socket.
     *
@@ -51,65 +165,59 @@ int main ()
     * sockaddr_in6 : struct for IPv6
     * sockaddr     : generic struct - bind expects this
     * */
-   struct sockaddr_in server_addr;
-   struct sockaddr_in client_addr;
+   sockaddr_in server_addr{};
+   sockaddr_in client_addr{};
    
-   /* Initialise all bytes to zero */
-   memset(&server_addr, 0, sizeof(server_addr));
-   memset(&client_addr, 0, sizeof(client_addr));
-   memset(buffer, 0, sizeof(buffer));
-   
-   
-   
-   /* socket() creates a socket and returns a file descriptor - a number to
-    * identify the socket.
-    * AF_INET     : Address family IPv4 (INET6 is IPv6)
-    * SOCK_STREAM : Communicate by TCP
-    * 0 : Informs Linux to use the default TCP protocol
-    * */
-   server_fd = socket(AF_INET, SOCK_STREAM, 0);
-   if (server_fd < 0)
+   /* Create a server socket. */
+   if ( !server_socket.Create() )
    {
       cout << "ERR : Socket creation failed." << endl;
       return FAILURE;
    }
 
-   /* Populate the server_addr struct with socket IP and port details */
-   
+   /* Create an epoll instance. */
+   if (!epoll.Create())
+   {
+      cout << "ERR : Failed to create epoll instance." << endl;
+      return FAILURE;
+   }
+
+   /* Populate the server_addr struct with socket IP and port details.
+    * htons() : It twiddles host's little-endian no. to big-endian for network.
+    * INADDR_ANY : Accept connections on any network interface.*/
    server_addr.sin_family        = AF_INET;
-   
-   /* htons() twiddles host's little-endian number to big-endian for network */
-   server_addr.sin_port          = htons(8080);
-   
-   /* INADDR_ANY : Accept connections on any network interface.*/
+   server_addr.sin_port          = htons(PORT);
    server_addr.sin_addr.s_addr   = INADDR_ANY;
 
-
-
    /* Bind the socket */
-   iRetVal = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
-   if ( iRetVal < 0 )
+   if ( !server_socket.Bind(server_addr) )
    {
       cout << "ERR : Bind failed." << endl;
-      close(server_fd);
       return FAILURE;
    }
-   cout << "--Socket Bound to Port 8080--" << endl;
 
-   /* listen() puts the server socket into a passive waiting state and starts
-    * maintaining a queue of incoming connection requests.
-    * backlog = 5 : Allows up to 5 clients waiting in queue then reject new ones.
-    * Note : listen does not block the program execution, it only queues the
-    *        incoming requests.
-    * */
-   iRetVal = listen(server_fd, 5);
-   if ( iRetVal < 0 )
+   /* Listen to socket */
+   if ( !server_socket.Listen(5) )
    {
       cout << "ERR : Listen failed." << endl;
-      close(server_fd);
       return FAILURE;
    }
-   cout << "--Listening on port 8080--" << endl;
+
+   /* Set server to Non-Blocking */
+   server_socket.SetNonBlocking();
+
+   /* EPOLLIN - event to indicate an fd is ready to read */
+   event.events = EPOLLIN;
+   event.data.fd = server_socket.GetFD();
+
+   /* Register the Server Socket */
+   if (!epoll.Add(server_socket.GetFD(), event))
+   {
+      cout << "ERR : Failed to add server socket to epoll." << endl;
+      return FAILURE;
+   }
+
+   cout << "--Server Initialized--" << endl;
 
    
    /* Prepare to accept clients */
@@ -149,41 +257,104 @@ int main ()
 
    if ( bytes_recvd < 0 )
    {
-      cout << "ERR : Failed to receive message." << endl;
-      close(client_fd);
-      close(server_fd);
-      return FAILURE;
-   }
+      /* Wait until there is ready events among sockets in epoll */
+      ready_sock_nmbr = epoll.Wait(ready_events,
+                                   MAX_EVENTS,
+                                   -1); 
+      if ( ready_sock_nmbr < 0 )
+      {
+         cout << "ERR : epoll_wait loop failure. " << endl;
+	 return FAILURE;
+      }
 
-   if ( bytes_recvd == 0 )
-   {
-      cout << "--Client disconnected.--" << endl;
-      close(client_fd);
-      close(server_fd);
-      return SUCCESS;
-   }
+      /* Iterate through the array of ready sockets. */
+      for ( int nmbr = 0; nmbr < ready_sock_nmbr; ++nmbr )
+      {
+         current_sock_fd = ready_events[nmbr].data.fd;
 
-   buffer[bytes_recvd] = '\0';
+	 /*Server Socket will handle connection requests*/
+	 if ( current_sock_fd == server_socket.GetFD() )
+         {
+            while (true)
+            {
+               client_len = sizeof(client_addr);
 
-   cout << "Client : " << buffer << endl;
-   
-   /* send() is to send data to client */
-   bytes_sent = send( client_fd,
-                      pReply,
-                      strlen(pReply),
-                      0 );
-   if (bytes_sent < 0)
-   {
-      cout << "ERR : Failed to send message." << endl;
-      close(client_fd);
-      close(server_fd);
-      return FAILURE;
-   }
-   
-   cout << "--Reply sent to client.--" << endl;
-   
-   /* Closing sockets before exiting program */
-   close(client_fd);
-   close(server_fd);
+              /* accept() takes one pending connection from the listen queue 
+	       * and creates a new socket dedicated to that client.
+               * client_addr struct : contains client's IP and port
+               * Note : accept pauses the server, waits for a client
+               *        to connect before continuing execution.
+               * */
+               client_fd = accept(server_socket.GetFD(),
+                                  (struct sockaddr *)&client_addr,
+                                  &client_len);
+
+               if (client_fd < 0)
+               {
+                  if ( errno == EAGAIN || errno == EWOULDBLOCK )
+		  {   break; }
+
+                  cout << "ERR : Accept failed." << endl;
+                  break;
+               }
+
+              /* Set client socket as Non-Blocking. A Non-blocking socket returns
+               * immediatly if there is no data present (eg: Client doesn't type
+               * a message for a long time). A blocking socket keeps waiting. */
+               SetNonBlocking(client_fd);
+
+	       /* Register client to epoll. */
+	       event.events = EPOLLIN;
+               event.data.fd = client_fd;
+
+               if (!epoll.Add(client_fd, event))
+               {
+                  cout << "ERR : Failed to add client socket to epoll." << endl;
+		  close(client_fd);
+		  continue;
+               }
+
+               connected_clients.push_back(client_fd);
+
+               cout << "Connected clients: "
+                    << connected_clients.size()
+                    << endl;
+            }//while end
+         }
+	 else
+         {
+            memset(buffer, 0, sizeof(buffer));
+
+            /* recv() receives data from the client socket into buffer.
+             *
+             * Note : The return type of recv() is ssize_t because
+             *        it returns a size in number of bytes or -1 for
+             *        error. POSIX uses the signed size type or
+             *        ssize_t to represent the negative values.
+             * */
+
+	    bytes_recvd = recv( current_sock_fd,
+                                buffer,
+                                sizeof(buffer) - 1,
+                                0 );
+
+            if ( bytes_recvd == 0 || 
+                 (bytes_recvd < 0 && errno != EAGAIN))
+            {
+	       DisconnectClient(epoll, current_sock_fd);
+	       continue;
+            }
+
+            buffer[bytes_recvd] = '\0';
+            
+	    /* Print msg on server.*/
+	    cout << buffer << endl;
+
+            BroadcastMessage(current_sock_fd,
+                             buffer,
+                             bytes_recvd); 
+	 }
+      }
+   } 
    return SUCCESS;
 }

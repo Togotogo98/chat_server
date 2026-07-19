@@ -1,13 +1,9 @@
 /******************************************************************************
- * Project : Multi-Client TCP Chat Server (Phase 1)
+ * Project : Multi-Client TCP Chat Server (TCP Chat Client)
  *
  * Description:
- *   Basic TCP client that:
- *     1. Creates a socket
- *     2. Connect to server
- *     3. Send data to server
- *     4. Receive a reply
- *     5. Close socket 
+ * This program connects to a TCP chat server, sends user messages, and
+ * receives messages from other connected clients.
  *
  ******************************************************************************/
 #include <iostream>
@@ -24,27 +20,59 @@ using namespace std;
 
 /*core socket api*/
 #include <sys/socket.h>
+#include <thread>
+#include <string>
 
 #define SUCCESS   0
 #define FAILURE   1
 
+void ReceiveMessages(int sock_fd)
+{
+   ssize_t bytes_recvd = 0;
+   char buffer[1024];
+
+   while (true)
+   {
+      memset(buffer, 0, sizeof(buffer));
+
+      /* Receive Messages from Server */
+      bytes_recvd = recv(sock_fd,
+                         buffer,
+                         sizeof(buffer) - 1,
+                         0);
+
+      if (bytes_recvd < 0)
+      {
+         cout << "ERR : Failed to receive reply." << endl;
+         break;
+      }
+
+      if (bytes_recvd == 0)
+      {
+         cout << "--Server closed connection.--" << endl;
+         break;
+      }
+      buffer[bytes_recvd] = '\0';
+
+      cout << buffer << endl;
+   }
+   return;
+}
 
 int main()
 {
    int iRetVal         = 0;
    int sock_fd         = 0;
    ssize_t bytes_sent  = 0;
-   ssize_t bytes_recvd = 0;
-   
-   const char *msg = "Hello Server!";
-   char buffer[1024];
+   std::string message;
+   std::string username;
+   std::string full_message;
 
    /* server_addr struct stores the IP and port details of the server */
    struct sockaddr_in server_addr;
    
    memset(&server_addr, 0, sizeof(server_addr));
-   memset(buffer, 0, sizeof(buffer));
-   
+
    /* creating a socket for the client */
    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
    if (sock_fd < 0)
@@ -90,45 +118,31 @@ int main()
    }
 
    cout << "--Connected to Server--" << endl;
+   cout << "Enter your name:" << endl;
+   getline(cin,username);
    
-   /* Send msg to server */
-   bytes_sent = send(sock_fd,
-                     msg,
-                     strlen(msg),
-                     0);
+   std::thread receiver(ReceiveMessages, sock_fd);
 
-   if (bytes_sent < 0)
+
+   while(true)
    {
-      cout << "ERR : Failed to send message." << endl;
-      close(sock_fd);
-      return FAILURE;
+      getline(cin, message);
+
+      full_message = username + " : " + message;
+      /* Send msg to server */
+      bytes_sent = send(sock_fd,
+                        full_message.c_str(),
+                        full_message.length(),
+                        0);
+
+      if (bytes_sent < 0)
+      {
+         cout << "ERR : Failed to send message." << endl;
+         close(sock_fd);
+         return FAILURE;
+      }
    }
-
-   cout << "Message sent to server." << endl;
-   
-   /* Receive Acknowledgement from Server */
-   bytes_recvd = recv(sock_fd,
-                   buffer,
-                   sizeof(buffer) - 1,
-                   0);
-
-   if (bytes_recvd < 0)
-   {
-      cout << "ERR : Failed to receive reply." << endl;
-      close(sock_fd);
-      return FAILURE;
-   }
-
-   if (bytes_recvd == 0)
-   {
-      cout << "--Server closed connection.--" << endl;
-      close(sock_fd);
-      return SUCCESS;
-   }
-
-   buffer[bytes_recvd] = '\0';
-
-   cout << "Server : " << buffer << endl;
+   receiver.join();
    
    /* Closing socket before exiting */
    close(sock_fd);
