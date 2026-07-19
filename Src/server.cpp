@@ -2,9 +2,13 @@
  * Project : Multi-Client TCP Chat Server
  *
  * Description:
- *   TCP-based client-server application that accepts client connections,
- *   processes client requests, and facilitates communication between multiple
- *   clients.
+ *   Basic TCP server that:
+ *     1. Creates a socket
+ *     2. Binds to port 8080
+ *     3. Listens for one client
+ *     4. Accepts a connection
+ *     5. Receives a message
+ *     6. Sends an acknowledgement
  *
  *********************************************************************************/
 
@@ -217,7 +221,41 @@ int main ()
 
    
    /* Prepare to accept clients */
-   while(true)
+   client_len = sizeof(client_addr);
+
+   /* accept() takes one pending connection from the listen queue and creates
+    * a new socket dedicated to that client.
+    * client_addr struct : contains client's IP and port
+    * Note : accept pauses the server, waits for a client to connect before
+    *        continuing execution.
+    * */
+   client_fd = accept(server_fd,
+                     (struct sockaddr *)&client_addr,
+                     &client_len);
+
+   if (client_fd < 0)
+   {
+      cout << "ERR : Accept failed." << endl;
+      close(server_fd);
+      return FAILURE;
+   }
+
+   cout << "--Client Connected--" << endl;
+
+   /* recv() receives data from the client socket into buffer.
+    * 
+    * Note : The return type of recv() is ssize_t because
+    *        it returns a size in number of bytes or -1 for
+    *        error. POSIX uses the signed size type or
+    *        ssize_t to represent the negative values.
+    * */
+
+   bytes_recvd = recv( client_fd,
+                       buffer,
+                       sizeof(buffer) - 1,
+                       0 );
+
+   if ( bytes_recvd < 0 )
    {
       /* Wait until there is ready events among sockets in epoll */
       ready_sock_nmbr = epoll.Wait(ready_events,
